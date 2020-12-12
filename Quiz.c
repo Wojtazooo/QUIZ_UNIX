@@ -143,7 +143,7 @@ void add_question(char* path, char *word, char* translation)
 
     // adding to file
     int out;
-    if((out = open(path,O_CREAT|O_RDWR|O_APPEND,0777)) < 0) ERR("open");
+    if((out = open(path,O_RDWR|O_APPEND,0777)) < 0) ERR("open");
     if(write(out,buf,strlen(buf)) <= 0) ERR("write");
     if(close(out)) ERR("close");
 }
@@ -166,6 +166,48 @@ int is_question_new(char *path, char *word)
     return 1;
 }
 
+int is_question_new2(char *path, char *word)
+{
+    // open file only to read
+    int in;
+    if((in = open(path,O_RDONLY)) < 0) ERR("open");
+
+    char *buf = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+    char c;
+    int act_word_size = 0; 
+    int ignore = 0; // we will check only first word in line
+    while(1)
+    {
+        if(read(in,&c,1) == 0) // exit if we reach end of file
+        {
+            break;
+        }
+        if(c == ' ') // end of a first word in a line
+        {
+            if(act_word_size == strlen(word)) // words can be the same only if they have the same length
+            {
+                if(strncmp(buf,word,act_word_size) == 0)
+                {
+                    return 0; 
+                }
+            }
+            ignore = 1; // ignore second part of a line
+        }
+        if(ignore == 0) // first word in a line
+        {
+            buf[act_word_size] = c;
+            buf[act_word_size+1] = '\0';
+            act_word_size++;
+        }       
+        if(c == '\n') // end of a line
+        {
+            act_word_size = 0;
+            ignore = 0;
+        } 
+    }
+    return 1;
+}
+
 void create_quiz_mode(int argc, char **argv)
 {
     // read arguments
@@ -176,9 +218,13 @@ void create_quiz_mode(int argc, char **argv)
     if(name) printf("Welcome %s in create quiz mode!\n",name);
     else ERR("getenv");
 
+    // create_file
+    int in; 
+    if((in = open(path,O_CREAT|O_RDWR|O_APPEND,0777)) < 0) ERR("open");
+
     // add new word and translation to quiz file
     char english_word[MAX_COMMAND_SIZE];
-    char translation[MAX_COMMAND_SIZE];  
+    char translation[MAX_COMMAND_SIZE]; 
     printf("[word translation] (type exit to exit)\n");
     while(1) // exit after "exit" input
     {
@@ -186,10 +232,9 @@ void create_quiz_mode(int argc, char **argv)
         if(strcmp(english_word, "exit") == 0) break;
         if(fscanf(stdin, "%s", translation) < 0) ERR("fscanf");  
         if(strcmp(translation, "exit") == 0) break;
-        //printf("[%s %s]\n", english_word, translation);
 
         // if a question is new we will add it to file
-        if(is_question_new(path,english_word))
+        if(is_question_new2(path,english_word))
         {
             add_question(path,english_word,translation);
             printf("[%s %s] was added\n", english_word, translation);
