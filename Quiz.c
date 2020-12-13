@@ -8,11 +8,25 @@
 #include <string.h>
 #include <fcntl.h>
 #include <time.h>
+#include <pthread.h>
+#include <sys/wait.h>
 #define QUESTIONS 10
 #define MAX_PATH 300
 #define DEFAULT_TIME 120
 #define MAX_COMMAND_SIZE 100
+#define LAST_REMIDER_TIME 30
 #define QUIZFILE_EXT ".quiz"
+
+int quit_status = 0;
+
+typedef struct time_thread_args
+{
+    pthread_t tid;
+    int t;
+    int *is_time_up;
+    pthread_mutex_t* mx_Quitflag;
+} time_thread_args;
+
 
 void usage(char* pname)
 {
@@ -183,7 +197,7 @@ void read_data(char* path, char ***quiz_tab)
 
 }
 
-void create_test(char ***quiz_tab, int questions_in_file, int n)
+void create_test(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_Quitflag)
 {
     // create array with numbers of questions
     int *numbers = malloc(sizeof(int)*questions_in_file);
@@ -203,19 +217,46 @@ void create_test(char ***quiz_tab, int questions_in_file, int n)
     }
 
     char* answer = malloc(sizeof(char) * MAX_COMMAND_SIZE);
-    int correct = 0;
     for(int i = 0; i < n; i++)
     {
+        pthread_mutex_lock(mx_Quitflag);
+        if(*is_time_up == 1)
+        {
+            printf("Time is up!\n");
+            pthread_mutex_unlock(mx_Quitflag);
+            break;
+        }
+        pthread_mutex_unlock(mx_Quitflag);
+
         printf("%d. %s: ",i+1,quiz_tab[numbers[i%questions_in_file]][0]);
         scanf("%s",answer);
         if(strcmp(answer,quiz_tab[numbers[i%questions_in_file]][1]) == 0) 
         {
             printf("answer is correct\n");
-            correct++;
+            (*correct)++;
         }
         else printf("bad answer\n");
-    }
+    }    
 
+    free(numbers);
+}
+
+void* time_thread_work(void *voidPtr)
+{
+    time_thread_args *args = voidPtr;
+    sleep(args->t - LAST_REMIDER_TIME);
+    printf("\nLeft %ds\n",LAST_REMIDER_TIME);
+    sleep(LAST_REMIDER_TIME);
+    pthread_mutex_lock(args->mx_Quitflag);
+    *args->is_time_up = 1;
+    pthread_mutex_unlock(args->mx_Quitflag);    
+    // send SIGUSR to terminate scanf
+    kill(0,SIGUSR1);
+    return NULL;
+}
+
+void print_stats(int correct, int n)
+{
     printf("Final score: %d/%d", correct,n);
     int score =  correct*100/n;
     if(score >= 90) printf(" grade S\n");
@@ -224,7 +265,23 @@ void create_test(char ***quiz_tab, int questions_in_file, int n)
     else if(score >= 60) printf(" grade C\n");
     else if(score >= 50) printf(" grade D\n");
     else printf(" grade E\n");
-    
+}
+
+
+void sethandler(void (*f)(int), int sigNo)
+{
+    struct sigaction act;
+    memset(&act, 0, sizeof(struct sigaction));
+    act.sa_handler = f;
+    if(-1 == sigaction(sigNo, &act, NULL)) ERR("sigacion");
+}
+
+void sig_handler(int sig)
+{
+    if(sig == SIGUSR1)
+        printf("\n"); // terminate scanf
+    if(sig == SIGUSR2)
+        quit_status = 1;
 }
 
 void quiz_mode(int argc, char **argv)
@@ -235,11 +292,26 @@ void quiz_mode(int argc, char **argv)
     char *path;
     read_arg_quizmode(argc,argv,&n,&t,&path);
 
+    
     // welcome with $USER environment variable
     char *name = getenv("USER");
     if(name) printf("Welcome %s in quiz mode!\n",name);
     else ERR("getenv");
+    printf("You have %d s for this test\n", t);
 
+    int correct = 0; // correct answers for statistics
+    int is_time_up = 0; 
+
+    time_thread_args args;
+    args.t = t;
+    args.is_time_up = &is_time_up;
+    pthread_mutex_t mxquitflag = PTHREAD_MUTEX_INITIALIZER;
+    args.mx_Quitflag = &mxquitflag;
+
+    int err = pthread_create(&(args.tid), NULL, time_thread_work, &args);
+    if(err != 0) ERR("Couldn't create time thread");
+
+    sethandler(sig_handler, SIGUSR1);
     // count all lines
     int questions_in_file = count_lines(path);
 
@@ -256,9 +328,27 @@ void quiz_mode(int argc, char **argv)
     // read data from file to our table
     read_data(path,quiz_tab);
 
-    create_test(quiz_tab, questions_in_file,n);
-}
+    create_test(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mxquitflag);
 
+    print_stats(correct,n);     
+
+    for(int i = 0; i < questions_in_file; i++)
+    {
+        free(quiz_tab[i][0]);
+        free(quiz_tab[i][1]);        
+        free(quiz_tab[i]);
+    }
+    free(quiz_tab);
+
+    if(is_time_up == 0)
+    {
+        pthread_cancel(args.tid);
+    }
+    else
+    {
+        pthread_join(args.tid,NULL);
+    }
+}
 
 void add_question(char* path, char *word, char* translation)
 {
@@ -277,24 +367,6 @@ void add_question(char* path, char *word, char* translation)
 }
 
 int is_question_new(char *path, char *word)
-{
-    char *line = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-    size_t len = 0;
-    FILE* stream = fopen(path,"r");
-    if(!stream) return 1; // if file doesnt exist
-
-    while(getline(&line,&len, stream) != -1)
-    {
-        if(strncmp(line,word,strlen(word)) == 0) // question already in this quiz file
-        {
-            fclose(stream);
-            return 0; 
-        }
-    }
-    return 1;
-}
-
-int is_question_new2(char *path, char *word)
 {
     // open file only to read
     int in;
@@ -358,7 +430,7 @@ void create_quiz_mode(int argc, char **argv)
         if(strcmp(translation, "exit") == 0) break;
 
         // if a question is new we will add it to file
-        if(is_question_new2(path,english_word))
+        if(is_question_new(path,english_word))
         {
             add_question(path,english_word,translation);
             printf("[%s %s] was added\n", english_word, translation);
@@ -370,10 +442,12 @@ void create_quiz_mode(int argc, char **argv)
 
 }
 
+
 int main(int argc, char **argv)
 {
     if(argc == 1) usage(argv[0]);  
     if(strcmp(argv[1],"-q") == 0) quiz_mode(argc,argv);
     else if(strcmp(argv[1],"-c") == 0) create_quiz_mode(argc,argv);
     else usage(argv[0]);
+    exit(EXIT_SUCCESS);
 }
