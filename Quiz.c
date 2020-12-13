@@ -10,6 +10,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #define QUESTIONS 10
 #define MAX_PATH 300
 #define DEFAULT_TIME 120
@@ -17,16 +18,31 @@
 #define LAST_REMIDER_TIME 30
 #define QUIZFILE_EXT ".quiz"
 
-int quit_status = 0;
 
 typedef struct time_thread_args
 {
     pthread_t tid;
     int t;
     int *is_time_up;
-    pthread_mutex_t* mx_Quitflag;
+    pthread_mutex_t* mx_is_time_up;
 } time_thread_args;
 
+typedef struct d_thread_args
+{
+    pthread_t tid;
+    char* d_path;
+    char *path;
+    int* Quitflag;
+    pthread_mutex_t* mxQuitflag;
+} d_thread_args;
+
+typedef struct quit_thread_args
+{
+    pthread_t tid;
+    int *Quitflag;
+    pthread_mutex_t* mxQuitflag;
+    sigset_t *pMask;
+} quit_thread_args;
 
 void usage(char* pname)
 {
@@ -123,12 +139,11 @@ void read_arg_createmode(int argc, char **argv, char **path, char **dir_path)
         fprintf(stderr,"Path is mandatory!\n");
         usage(argv[0]);
     }
-
     if(!is_extension_valid(*path))
     {
         printf("File should have %s extension\n", QUIZFILE_EXT);
         usage(argv[0]);
-    }
+    }    
 }
 
 int count_lines(char*path)
@@ -152,7 +167,7 @@ void read_data(char* path, char ***quiz_tab)
     int in;
     if((in = open(path,O_RDONLY)) < 0) ERR("open");
 
-    int actual_word_flag; // 0 -> first word 1 -> second word
+    int actual_word_flag = 0; // 0 -> first word 1 -> second word
     int curr = 0;
     int ind = 0;
     char *first_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
@@ -197,7 +212,7 @@ void read_data(char* path, char ***quiz_tab)
 
 }
 
-void create_test(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_Quitflag)
+void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up)
 {
     // create array with numbers of questions
     int *numbers = malloc(sizeof(int)*questions_in_file);
@@ -219,14 +234,14 @@ void create_test(char ***quiz_tab, int questions_in_file, int* correct, int n, i
     char* answer = malloc(sizeof(char) * MAX_COMMAND_SIZE);
     for(int i = 0; i < n; i++)
     {
-        pthread_mutex_lock(mx_Quitflag);
+        pthread_mutex_lock(mx_is_time_up);
         if(*is_time_up == 1)
         {
             printf("Time is up!\n");
-            pthread_mutex_unlock(mx_Quitflag);
+            pthread_mutex_unlock(mx_is_time_up);
             break;
         }
-        pthread_mutex_unlock(mx_Quitflag);
+        pthread_mutex_unlock(mx_is_time_up);
 
         printf("%d. %s: ",i+1,quiz_tab[numbers[i%questions_in_file]][0]);
         scanf("%s",answer);
@@ -247,10 +262,10 @@ void* time_thread_work(void *voidPtr)
     sleep(args->t - LAST_REMIDER_TIME);
     printf("\nLeft %ds\n",LAST_REMIDER_TIME);
     sleep(LAST_REMIDER_TIME);
-    pthread_mutex_lock(args->mx_Quitflag);
+    pthread_mutex_lock(args->mx_is_time_up);
     *args->is_time_up = 1;
-    pthread_mutex_unlock(args->mx_Quitflag);    
-    // send SIGUSR to terminate scanf
+    pthread_mutex_unlock(args->mx_is_time_up);    
+    // send SIGUSR1 to terminate scanf
     kill(0,SIGUSR1);
     return NULL;
 }
@@ -267,7 +282,6 @@ void print_stats(int correct, int n)
     else printf(" grade E\n");
 }
 
-
 void sethandler(void (*f)(int), int sigNo)
 {
     struct sigaction act;
@@ -280,8 +294,6 @@ void sig_handler(int sig)
 {
     if(sig == SIGUSR1)
         printf("\n"); // terminate scanf
-    if(sig == SIGUSR2)
-        quit_status = 1;
 }
 
 void quiz_mode(int argc, char **argv)
@@ -306,7 +318,7 @@ void quiz_mode(int argc, char **argv)
     args.t = t;
     args.is_time_up = &is_time_up;
     pthread_mutex_t mxquitflag = PTHREAD_MUTEX_INITIALIZER;
-    args.mx_Quitflag = &mxquitflag;
+    args.mx_is_time_up = &mxquitflag;
 
     int err = pthread_create(&(args.tid), NULL, time_thread_work, &args);
     if(err != 0) ERR("Couldn't create time thread");
@@ -328,7 +340,7 @@ void quiz_mode(int argc, char **argv)
     // read data from file to our table
     read_data(path,quiz_tab);
 
-    create_test(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mxquitflag);
+    test_user(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mxquitflag);
 
     print_stats(correct,n);     
 
@@ -404,6 +416,150 @@ int is_question_new(char *path, char *word)
     return 1;
 }
 
+void* d_thread_work(void* voidPtr)
+{
+    d_thread_args *args = voidPtr;
+    printf("looking for .quiz files in DIR %s\n", args->d_path);
+    
+
+    if(chdir(args->d_path)) ERR("chdir"); 
+    
+    DIR *dirp;
+    struct dirent *dp;
+    struct stat filestat;
+
+    if(NULL == (dirp = opendir(args->d_path))) ERR("opendir");
+
+    char*word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+    char*translation = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+
+
+    do
+    {
+        errno = 0;
+        if((dp = readdir(dirp)) != NULL)
+        {
+            if(lstat(dp->d_name, &filestat)) ERR("lstat");
+            else if(S_ISREG(filestat.st_mode))
+            {
+                if(is_extension_valid(dp->d_name))
+                {
+                    printf("reading from file: %s\n", dp->d_name);
+                    int start_pos = 0;
+                    int new_bytes = 0;
+                    do
+                    {
+                        pthread_mutex_lock(args->mxQuitflag);
+                        if(*args->Quitflag == 1)
+                        {
+                            pthread_mutex_unlock(args->mxQuitflag);
+                            break;
+                        }
+                        pthread_mutex_unlock(args->mxQuitflag);
+
+                        new_bytes = read_one_line(dp->d_name, word, translation, start_pos);
+                        start_pos += new_bytes;
+                        if(is_question_new(args->path,word))
+                            add_question(args->path,word,translation);
+                    } while (new_bytes != 0);     
+
+
+                    pthread_mutex_lock(args->mxQuitflag);
+                    if(*args->Quitflag == 1)
+                    {
+                        pthread_mutex_unlock(args->mxQuitflag);
+                        break;
+                    }
+                    pthread_mutex_unlock(args->mxQuitflag);           
+                }   
+            }
+        }
+    } while(dp != NULL);
+    return NULL;
+}
+
+void* quit_thread_work(void* voidPtr)
+{
+    quit_thread_args *args = voidPtr;
+    int signo;
+    for(;;)   
+    {
+        if(sigwait(args->pMask, &signo)) ERR("sigwait");
+        if(signo == SIGINT || signo == SIGQUIT)
+        {
+            pthread_mutex_lock(args->mxQuitflag);
+            
+            char* input = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+            kill(0,SIGUSR1);            
+            printf("\nAre you sure you want to exit? [y/n]:");
+            scanf("%s", input);
+
+            if(strcmp(input, "y") == 0)
+            {
+                *args->Quitflag = 1;
+                pthread_mutex_unlock(args->mxQuitflag);
+                return NULL;
+            }
+            else
+            {
+                printf("continue then\n");
+            }
+            pthread_mutex_unlock(args->mxQuitflag);    
+        }
+    }
+    return NULL;
+}
+
+int read_one_line(char*path, char* word, char* translation, int start_pos)
+{
+    int in; 
+    if((in = open(path,O_RDONLY)) < 0) ERR("open");
+
+    char *first_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+    char *second_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+
+    int ind = 0;
+    int actual_word_flag = 0;
+    char c;
+    int bytes_read = 0;
+
+    if(lseek(in,start_pos,SEEK_SET) < 0) ERR("lseek");
+    while(read(in,&c,1) > 0) 
+    {
+        bytes_read++;
+        if(c == ' ')
+        {
+            strcpy(word,first_word);
+            strcpy(first_word, "");
+            ind = 0;
+            actual_word_flag = 1;
+        }
+        else if(c == '\n')
+        {
+            strcpy(translation,second_word);
+            strcpy(second_word, "");
+            break;
+        }            
+        else
+        {
+            if(actual_word_flag == 0)
+            {
+                first_word[ind] = c;
+                first_word[ind+1] = '\0';
+                ind++;
+            }
+            else
+            {
+                second_word[ind] = c;
+                second_word[ind+1] = '\0';
+                ind++;
+            } 
+        }
+    }
+    close(in);
+    return bytes_read;
+}
+
 void create_quiz_mode(int argc, char **argv)
 {
     // read arguments
@@ -418,33 +574,96 @@ void create_quiz_mode(int argc, char **argv)
     int in; 
     if((in = open(path,O_CREAT|O_RDWR|O_APPEND,0777)) < 0) ERR("open");
 
+    int Quitflag = 0;
+    pthread_mutex_t mx_quitflag = PTHREAD_MUTEX_INITIALIZER;
+
+    quit_thread_args q_args;
+    q_args.Quitflag = &Quitflag;
+    q_args.mxQuitflag = &mx_quitflag;
+    
+    // signal mask
+    sigset_t oldMask, newMask;
+    sigemptyset(&newMask);
+    sigaddset(&newMask, SIGINT);
+    sigaddset(&newMask, SIGQUIT);
+    if(pthread_sigmask(SIG_BLOCK, &newMask, &oldMask)) ERR("SIG_BLOCK error");
+    q_args.pMask = &newMask;
+    int q_err = pthread_create(&(q_args.tid), NULL, quit_thread_work, &q_args);
+    if(q_err != 0) ERR("Couldn't create quit thread");
+
+
+    // run d_thread which will take data from .quiz files in d_path
+    if(strcmp(dir_path,"")!=0)
+    {
+        d_thread_args d_args;
+        d_args.d_path = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+        d_args.path = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+        strcpy(d_args.d_path, dir_path);
+        strcpy(d_args.path, path);
+        d_args.mxQuitflag = &mx_quitflag;
+        d_args.Quitflag = &Quitflag;
+        int dt_err = pthread_create(&(d_args.tid), NULL, d_thread_work,&d_args);
+        if(dt_err != 0) ERR("Couldn't create time thread");
+        pthread_join(d_args.tid,NULL);
+    }
+
     // add new word and translation to quiz file
     char english_word[MAX_COMMAND_SIZE];
     char translation[MAX_COMMAND_SIZE]; 
     printf("[word translation] (type exit to exit)\n");
     while(1) // exit after "exit" input
     {
-        if(fscanf(stdin, "%s", english_word) < 0) ERR("fscanf");  
-        if(strcmp(english_word, "exit") == 0) break;
-        if(fscanf(stdin, "%s", translation) < 0) ERR("fscanf");  
-        if(strcmp(translation, "exit") == 0) break;
-
-        // if a question is new we will add it to file
-        if(is_question_new(path,english_word))
+        pthread_mutex_lock(&mx_quitflag);
+        if(Quitflag == 1)
         {
-            add_question(path,english_word,translation);
-            printf("[%s %s] was added\n", english_word, translation);
+            pthread_mutex_unlock(&mx_quitflag);
+            break;
         }
         else
-            printf("Translation of %s already exists in %s\n", english_word, path);    
+        {
+            pthread_mutex_unlock(&mx_quitflag);
+            scanf("%s", english_word);  
+            if(strcmp(english_word, "exit") == 0) break;
+        }
+        
+        pthread_mutex_lock(&mx_quitflag);
+        if(Quitflag == 1)
+        {
+            pthread_mutex_unlock(&mx_quitflag);
+            break;            
+        }
+        else
+        {
+            pthread_mutex_unlock(&mx_quitflag);
+            scanf("%s", translation);  
+            if(strcmp(translation, "exit") == 0) break;
+        }
+        
+
+        pthread_mutex_lock(&mx_quitflag);
+        if(Quitflag == 1)
+        {
+            pthread_mutex_unlock(&mx_quitflag);
+            break;
+        }
+        else
+        {
+            pthread_mutex_unlock(&mx_quitflag);
+            if(is_question_new(path,english_word))
+            {
+                add_question(path,english_word,translation);
+                printf("[%s %s] was added\n", english_word, translation);
+            }
+            else
+                printf("Translation of %s already exists in %s\n", english_word, path);    
+   
+        }
     }
-
-
 }
-
 
 int main(int argc, char **argv)
 {
+    sethandler(sig_handler,SIGUSR1);
     if(argc == 1) usage(argv[0]);  
     if(strcmp(argv[1],"-q") == 0) quiz_mode(argc,argv);
     else if(strcmp(argv[1],"-c") == 0) create_quiz_mode(argc,argv);
