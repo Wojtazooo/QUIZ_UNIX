@@ -1,12 +1,13 @@
 #define ERR(source) (perror(source), fprintf(stderr, "%s:%d\n", __FILE__,__LINE__),exit(EXIT_FAILURE))
-#include <stdlib.h>
 #include <unistd.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <dirent.h>
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <time.h>
 #define QUESTIONS 10
 #define MAX_PATH 300
 #define DEFAULT_TIME 120
@@ -28,7 +29,7 @@ void usage(char* pname)
     exit(EXIT_FAILURE);
 }
 
-int is_valid_extensions(char *path)
+int is_extension_valid(char *path)
 {
     char *dot = strrchr(path,'.');
     if(dot == NULL) return 0;
@@ -72,7 +73,7 @@ void read_arg_quizmode(int argc, char **argv, int *questions, int* time, char **
         printf("Path is mandatory!\n");
         usage(argv[0]);
     }   
-    if(!is_valid_extensions(*path))
+    if(!is_extension_valid(*path))
     {
         printf("File should have %s extension\n", QUIZFILE_EXT);
         usage(argv[0]);
@@ -109,28 +110,155 @@ void read_arg_createmode(int argc, char **argv, char **path, char **dir_path)
         usage(argv[0]);
     }
 
-    if(!is_valid_extensions(*path))
+    if(!is_extension_valid(*path))
     {
         printf("File should have %s extension\n", QUIZFILE_EXT);
         usage(argv[0]);
     }
 }
 
+int count_lines(char*path)
+{
+    int in;
+    if((in = open(path,O_RDONLY)) < 0) ERR("open");
+    char c;
+    int questions_in_file = 0;
+    while(read(in,&c,1) > 0)
+    {
+        if(c == '\n')
+        {
+            questions_in_file++;
+        }
+    }
+    return questions_in_file;
+}
+
+void read_data(char* path, char ***quiz_tab)
+{
+    int in;
+    if((in = open(path,O_RDONLY)) < 0) ERR("open");
+
+    int actual_word_flag; // 0 -> first word 1 -> second word
+    int curr = 0;
+    int ind = 0;
+    char *first_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+    char *second_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+    char c;
+
+    if(lseek(in,0,SEEK_SET) < 0) ERR("lseek");
+    while(read(in,&c,1) > 0) // count how many lines;
+    {
+        if(c == ' ')
+        {
+            strcpy(quiz_tab[curr][0], first_word);
+            strcpy(first_word, "");
+            ind = 0;
+            actual_word_flag = 1;
+        }
+        else if(c == '\n')
+        {
+            strcpy(quiz_tab[curr][1], second_word);
+            strcpy(second_word, "");
+            curr++;
+            actual_word_flag = 0;
+            ind = 0;
+        }            
+        else
+        {
+            if(actual_word_flag == 0)
+            {
+                first_word[ind] = c;
+                first_word[ind+1] = '\0';
+                ind++;
+            }
+            else
+            {
+                second_word[ind] = c;
+                second_word[ind+1] = '\0';
+                ind++;
+            } 
+        }
+    }
+    close(in);
+
+}
+
+void create_test(char ***quiz_tab, int questions_in_file, int n)
+{
+    // create array with numbers of questions
+    int *numbers = malloc(sizeof(int)*questions_in_file);
+    for(int i = 0; i < questions_in_file; i++)
+    {
+        numbers[i] = i;
+    }
+     
+    // shuffle 
+    srand(time(NULL));
+    for(int j = 0; j < questions_in_file; j++)
+    {
+        int k = rand()%questions_in_file;
+        int val = numbers[j];
+        numbers[j] = numbers[k];
+        numbers[k] = val;            
+    }
+
+    char* answer = malloc(sizeof(char) * MAX_COMMAND_SIZE);
+    int correct = 0;
+    for(int i = 0; i < n; i++)
+    {
+        printf("%d. %s: ",i+1,quiz_tab[numbers[i%questions_in_file]][0]);
+        scanf("%s",answer);
+        if(strcmp(answer,quiz_tab[numbers[i%questions_in_file]][1]) == 0) 
+        {
+            printf("answer is correct\n");
+            correct++;
+        }
+        else printf("bad answer\n");
+    }
+
+    printf("Final score: %d/%d", correct,n);
+    int score =  correct*100/n;
+    if(score >= 90) printf(" grade S\n");
+    else if(score >= 80) printf(" grade A\n");
+    else if(score >= 70) printf(" grade B\n");
+    else if(score >= 60) printf(" grade C\n");
+    else if(score >= 50) printf(" grade D\n");
+    else printf(" grade E\n");
+    
+}
+
 void quiz_mode(int argc, char **argv)
 {
     // read arguments of quiz mode
-    int questions;
-    int time;
+    int n;
+    int t;
     char *path;
-    read_arg_quizmode(argc,argv,&questions,&time,&path);
+    read_arg_quizmode(argc,argv,&n,&t,&path);
 
     // welcome with $USER environment variable
     char *name = getenv("USER");
     if(name) printf("Welcome %s in quiz mode!\n",name);
     else ERR("getenv");
 
+    // count all lines
+    int questions_in_file = count_lines(path);
+
+    // prepare tab with quiz words
+    char ***quiz_tab;
+    quiz_tab = malloc(sizeof(char**)*questions_in_file);
+    for(int i = 0; i < questions_in_file; i++)
+    {
+        quiz_tab[i] = malloc(sizeof(char*)*2);
+        quiz_tab[i][0] = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+        quiz_tab[i][1] = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+    }
     
+    // read data from file to our table
+    read_data(path,quiz_tab);
+
+    create_test(quiz_tab, questions_in_file,n);
 }
+
 
 void add_question(char* path, char *word, char* translation)
 {
@@ -176,12 +304,8 @@ int is_question_new2(char *path, char *word)
     char c;
     int act_word_size = 0; 
     int ignore = 0; // we will check only first word in line
-    while(1)
+    while(read(in,&c,1) != 0) // exit if we reach end of file
     {
-        if(read(in,&c,1) == 0) // exit if we reach end of file
-        {
-            break;
-        }
         if(c == ' ') // end of a first word in a line
         {
             if(act_word_size == strlen(word)) // words can be the same only if they have the same length
