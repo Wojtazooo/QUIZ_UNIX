@@ -610,32 +610,6 @@ void quiz_mode(int argc, char **argv)
     int correct = 0; // correct answers for statistics
     test_user(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mx_is_time_up, &Quitflag, &mx_quitflag);
 
-    
-    // quit safety with statistics and cancel quit_thread if time is up or user finished test in time
-    pthread_mutex_lock(&mx_quitflag);
-    if(Quitflag != 1)
-    {
-        pthread_mutex_unlock(&mx_quitflag);
-        print_stats(correct,n);
-        pthread_cancel(q_args,NULL);
-    }   
-    else
-    {
-        pthread_join(q_args.tid,NULL);
-    }
-    
-    // cancel time thread if user finished before time
-    pthread_mutex_lock(&mx_is_time_up);
-    if(is_time_up == 0)
-    {
-        pthread_cancel(t_args.tid);
-    }
-    else
-    {
-        pthread_join(t_args.tid,NULL);
-    }
-    pthread_mutex_unlock(&mx_is_time_up);
-
     // free allocated memory
     for(int i = 0; i < questions_in_file; i++)
     {
@@ -644,8 +618,33 @@ void quiz_mode(int argc, char **argv)
         free(quiz_tab[i]);
     }
     free(quiz_tab);
-    free(path);
-    free(name);
+
+    // quit safety with statistics and cancel quit_thread if time is up or user finished test in time
+    pthread_mutex_lock(&mx_quitflag);
+    if(Quitflag != 1)
+    {
+        pthread_mutex_unlock(&mx_quitflag);
+        print_stats(correct,n);
+        pthread_cancel(q_args.tid);
+    }   
+    else
+    {
+        pthread_mutex_unlock(&mx_quitflag);
+        pthread_join(q_args.tid,NULL);
+    }
+
+    // cancel time thread if user finished before time
+    pthread_mutex_lock(&mx_is_time_up);
+    if(is_time_up == 0)
+    {
+        pthread_mutex_unlock(&mx_is_time_up);
+        pthread_cancel(t_args.tid);
+    }
+    else
+    {
+        pthread_mutex_unlock(&mx_is_time_up);
+        pthread_join(t_args.tid,NULL);
+    }
 }
 
 void create_quiz_mode(int argc, char **argv)
@@ -712,7 +711,7 @@ void create_quiz_mode(int argc, char **argv)
         else
         {
             pthread_mutex_unlock(&mx_quitflag);
-            scanf("%s %s", english_word, translation);  
+            scanf("%s %s", english_word, translation); 
             if(strcmp(english_word, "exit") == 0 || strcmp(translation, "exit") == 0) break;
         }
         
