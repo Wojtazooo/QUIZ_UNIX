@@ -44,6 +44,35 @@ typedef struct quit_thread_args
     sigset_t *pMask;
 } quit_thread_args;
 
+void usage(char* pname);
+
+// mode validation
+void read_arg_quizmode(int argc, char **argv, int *questions, int* time, char **path);
+void read_arg_createmode(int argc, char **argv, char **path, char **dir_path);
+int is_extension_valid(char *path);
+
+//signals
+void sethandler(void (*f)(int), int sigNo);
+void sig_handler(int sig);
+
+// threads work
+void* quit_thread_work(void* voidPtr);
+void* time_thread_work(void *voidPtr);
+void* d_thread_work(void* voidPtr);
+
+// core functions 
+void quiz_mode(int argc, char **argv);
+void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up, int *Quitflag, pthread_mutex_t* mx_quitflag);
+void create_quiz_mode(int argc, char **argv);
+
+// operations with file
+int count_lines(char*path);
+void read_data(char* path, char ***quiz_tab);
+void print_stats(int correct, int n);
+void add_question(char* path, char *word, char* translation);
+int is_question_new(char *path, char *word);
+int read_one_line(char*path, char* word, char* translation, int start_pos);
+
 void usage(char* pname)
 {
     fprintf(stderr, "USAGE: %s\n", pname);
@@ -214,7 +243,7 @@ void read_data(char* path, char ***quiz_tab)
 
 }
 
-void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up)
+void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up, int *Quitflag, pthread_mutex_t* mx_quitflag)
 {
     // create array with numbers of questions
     int *numbers = malloc(sizeof(int)*questions_in_file);
@@ -236,6 +265,7 @@ void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int
     char* answer = malloc(sizeof(char) * MAX_COMMAND_SIZE);
     for(int i = 0; i < n; i++)
     {
+        // check time is up flag of time thread
         pthread_mutex_lock(mx_is_time_up);
         if(*is_time_up == 1)
         {
@@ -245,8 +275,18 @@ void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int
         }
         pthread_mutex_unlock(mx_is_time_up);
 
+        // check exitflag of quit thread
+        pthread_mutex_lock(mx_quitflag);
+        if(*Quitflag == 1)
+        {
+            pthread_mutex_unlock(mx_quitflag);
+            break;
+        }
+        pthread_mutex_unlock(mx_quitflag);
+
         printf("%d. %s: ",i+1,quiz_tab[numbers[i%questions_in_file]][0]);
         scanf("%s",answer);
+        printf("%s",answer);
         if(strcmp(answer,quiz_tab[numbers[i%questions_in_file]][1]) == 0) 
         {
             printf("answer is correct\n");
@@ -315,21 +355,36 @@ void quiz_mode(int argc, char **argv)
 
     int correct = 0; // correct answers for statistics
     int is_time_up = 0; 
+    int Quitflag = 0;
 
-    time_thread_args args;
-    args.t = t;
-    args.is_time_up = &is_time_up;
-    pthread_mutex_t mxquitflag = PTHREAD_MUTEX_INITIALIZER;
-    args.mx_is_time_up = &mxquitflag;
+    // quit thread preparation
+    quit_thread_args q_args;
+    pthread_mutex_t mx_quitflag = PTHREAD_MUTEX_INITIALIZER;
+    q_args.mxQuitflag = &mx_quitflag;
+    q_args.Quitflag = &Quitflag;
+    
+    // signal mask
+    sethandler(sig_handler,SIGUSR1); // sigusr1 will be use to terminate scanf
+    sigset_t oldMask, newMask;
+    sigemptyset(&newMask);
+    sigaddset(&newMask, SIGINT);
+    sigaddset(&newMask, SIGQUIT);
+    if(pthread_sigmask(SIG_BLOCK, &newMask, &oldMask)) ERR("SIG_BLOCK error");
+    q_args.pMask = &newMask;
+    int q_err = pthread_create(&(q_args.tid), NULL, quit_thread_work, &q_args);
+    if(q_err != 0) ERR("Couldn't create quit thread");
 
-    int err = pthread_create(&(args.tid), NULL, time_thread_work, &args);
-    if(err != 0) ERR("Couldn't create time thread");
-
-    sethandler(sig_handler, SIGUSR1);
-    // count all lines
-    int questions_in_file = count_lines(path);
+    // time thread
+    time_thread_args t_args;
+    t_args.t = t;
+    t_args.is_time_up = &is_time_up;
+    pthread_mutex_t mx_is_time_up = PTHREAD_MUTEX_INITIALIZER;
+    t_args.mx_is_time_up = &mx_is_time_up;
+    int t_err = pthread_create(&(t_args.tid), NULL, time_thread_work, &t_args);
+    if(t_err != 0) ERR("Couldn't create time thread");
 
     // prepare tab with quiz words
+    int questions_in_file = count_lines(path);
     char ***quiz_tab;
     quiz_tab = malloc(sizeof(char**)*questions_in_file);
     for(int i = 0; i < questions_in_file; i++)
@@ -342,9 +397,8 @@ void quiz_mode(int argc, char **argv)
     // read data from file to our table
     read_data(path,quiz_tab);
 
-    test_user(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mxquitflag);
-
-    print_stats(correct,n);     
+    // run test for user
+    test_user(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mx_is_time_up, &Quitflag, &mx_quitflag);
 
     for(int i = 0; i < questions_in_file; i++)
     {
@@ -354,14 +408,23 @@ void quiz_mode(int argc, char **argv)
     }
     free(quiz_tab);
 
+    pthread_mutex_lock(&mx_quitflag);
+    if(Quitflag != 1)
+    {
+        print_stats(correct,n);
+    }
+    pthread_mutex_unlock(&mx_quitflag);
+
+    pthread_mutex_lock(&mx_is_time_up);
     if(is_time_up == 0)
     {
-        pthread_cancel(args.tid);
+        pthread_cancel(t_args.tid);
     }
     else
     {
-        pthread_join(args.tid,NULL);
+        pthread_join(t_args.tid,NULL);
     }
+    pthread_mutex_unlock(&mx_is_time_up);
 }
 
 void add_question(char* path, char *word, char* translation)
@@ -495,11 +558,9 @@ void* quit_thread_work(void* voidPtr)
         if(signo == SIGINT || signo == SIGQUIT)
         {
             pthread_mutex_lock(args->mxQuitflag);
-            
+            kill(0,SIGUSR1);              
             char* input = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-            kill(0,SIGUSR1);  
-            //printf("\n");          
-            printf("\nAre you sure you want to exit? [y/n]:");
+            printf("Are you sure you want to exit? [y/n]:");
             scanf("%s", input);
 
             if(strcmp(input, "y") == 0)
@@ -512,14 +573,13 @@ void* quit_thread_work(void* voidPtr)
             else
             {
                 free(input);
-                printf("continue then\n");
             }
             pthread_mutex_unlock(args->mxQuitflag);    
         }
-        if(signo == SIGUSR1)
-        {
-            printf("\n");
-        }
+        // if(signo == SIGUSR1)
+        // {
+        //     printf("\n");
+        // }
     }
     free(args);
     return NULL;
@@ -629,9 +689,12 @@ void create_quiz_mode(int argc, char **argv)
     // add new word and translation to quiz file
     char english_word[MAX_COMMAND_SIZE];
     char translation[MAX_COMMAND_SIZE]; 
-    printf("[word translation] (type exit to exit)\n");
     while(1) // exit after "exit" input
     {
+        strcpy(english_word, "");
+        //strcpy(translation,"");
+        printf("[word translation] (type exit to exit)\n");
+        // before each operation we will check status of quitflag
         pthread_mutex_lock(&mx_quitflag);
         if(Quitflag == 1)
         {
@@ -645,6 +708,7 @@ void create_quiz_mode(int argc, char **argv)
             if(strcmp(english_word, "exit") == 0) break;
         }
         
+        // if quitflag == 0 and english word is not empty get translation
         pthread_mutex_lock(&mx_quitflag);
         if(Quitflag == 1)
         {
@@ -653,9 +717,12 @@ void create_quiz_mode(int argc, char **argv)
         }
         else
         {
-            pthread_mutex_unlock(&mx_quitflag);
-            scanf("%s", translation);  
-            if(strcmp(translation, "exit") == 0) break;
+            //if(strcmp(english_word,"") != 0)
+            //{
+                pthread_mutex_unlock(&mx_quitflag);
+                scanf("%s", translation);  
+                if(strcmp(translation, "exit") == 0) break;
+            //}
         }
         
 
@@ -668,15 +735,19 @@ void create_quiz_mode(int argc, char **argv)
         else
         {
             pthread_mutex_unlock(&mx_quitflag);
-            if(is_question_new(path,english_word))
+            if(strcmp(english_word,"") != 0 && strcmp(translation,"") != 0)
             {
-                add_question(path,english_word,translation);
-                printf("[%s %s] was added\n", english_word, translation);
+                if(is_question_new(path,english_word))
+                {
+                    add_question(path,english_word,translation);
+                    printf("[%s %s] was added\n", english_word, translation);
+                }
+                else
+                    printf("Translation of %s already exists in %s\n", english_word, path);  
             }
-            else
-                printf("Translation of %s already exists in %s\n", english_word, path);    
-   
         }
+
+        printf("ENG: %s PL: %s\n",english_word, translation);
     }
     free(path);
     free(dir_path);
