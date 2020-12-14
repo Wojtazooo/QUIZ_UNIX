@@ -286,13 +286,19 @@ void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int
 
         printf("%d. %s: ",i+1,quiz_tab[numbers[i%questions_in_file]][0]);
         scanf("%s",answer);
-        printf("%s",answer);
-        if(strcmp(answer,quiz_tab[numbers[i%questions_in_file]][1]) == 0) 
+        if(strcmp(answer,"^C") != 0)
         {
-            printf("answer is correct\n");
-            (*correct)++;
+            if(strcmp(answer,quiz_tab[numbers[i%questions_in_file]][1]) == 0) 
+            {
+                printf("answer is correct\n");
+                (*correct)++;
+            }
+            else printf("bad answer\n");
         }
-        else printf("bad answer\n");
+        else
+        {
+            i--; // we will ask this question again;
+        }        
     }    
     free(answer);
     free(numbers);
@@ -653,14 +659,12 @@ void create_quiz_mode(int argc, char **argv)
 
     int Quitflag = 0;
     pthread_mutex_t mx_quitflag = PTHREAD_MUTEX_INITIALIZER;
-
     quit_thread_args q_args;
     q_args.Quitflag = &Quitflag;
     q_args.mxQuitflag = &mx_quitflag;
     
-
-    sethandler(sig_handler,SIGUSR1);
     // signal mask
+    sethandler(sig_handler,SIGUSR1);
     sigset_t oldMask, newMask;
     sigemptyset(&newMask);
     sigaddset(&newMask, SIGINT);
@@ -691,8 +695,8 @@ void create_quiz_mode(int argc, char **argv)
     char translation[MAX_COMMAND_SIZE]; 
     while(1) // exit after "exit" input
     {
-        strcpy(english_word, "");
-        //strcpy(translation,"");
+        strcpy(english_word,"");
+        strcpy(translation,"");
         printf("[word translation] (type exit to exit)\n");
         // before each operation we will check status of quitflag
         pthread_mutex_lock(&mx_quitflag);
@@ -704,28 +708,10 @@ void create_quiz_mode(int argc, char **argv)
         else
         {
             pthread_mutex_unlock(&mx_quitflag);
-            scanf("%s", english_word);  
-            if(strcmp(english_word, "exit") == 0) break;
+            scanf("%s %s", english_word, translation);  
+            if(strcmp(english_word, "exit") == 0 || strcmp(translation, "exit") == 0) break;
         }
         
-        // if quitflag == 0 and english word is not empty get translation
-        pthread_mutex_lock(&mx_quitflag);
-        if(Quitflag == 1)
-        {
-            pthread_mutex_unlock(&mx_quitflag);
-            break;            
-        }
-        else
-        {
-            //if(strcmp(english_word,"") != 0)
-            //{
-                pthread_mutex_unlock(&mx_quitflag);
-                scanf("%s", translation);  
-                if(strcmp(translation, "exit") == 0) break;
-            //}
-        }
-        
-
         pthread_mutex_lock(&mx_quitflag);
         if(Quitflag == 1)
         {
@@ -735,7 +721,7 @@ void create_quiz_mode(int argc, char **argv)
         else
         {
             pthread_mutex_unlock(&mx_quitflag);
-            if(strcmp(english_word,"") != 0 && strcmp(translation,"") != 0)
+            if(strcmp(english_word,"") != 0 || strcmp(translation,"") != 0)
             {
                 if(is_question_new(path,english_word))
                 {
@@ -746,8 +732,6 @@ void create_quiz_mode(int argc, char **argv)
                     printf("Translation of %s already exists in %s\n", english_word, path);  
             }
         }
-
-        printf("ENG: %s PL: %s\n",english_word, translation);
     }
     free(path);
     free(dir_path);
