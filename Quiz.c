@@ -209,6 +209,8 @@ void read_data(char* path, char ***quiz_tab)
         }
     }
     close(in);
+    free(first_word);
+    free(second_word);
 
 }
 
@@ -252,7 +254,7 @@ void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int
         }
         else printf("bad answer\n");
     }    
-
+    free(answer);
     free(numbers);
 }
 
@@ -376,6 +378,7 @@ void add_question(char* path, char *word, char* translation)
     if((out = open(path,O_RDWR|O_APPEND,0777)) < 0) ERR("open");
     if(write(out,buf,strlen(buf)) <= 0) ERR("write");
     if(close(out)) ERR("close");
+    free(buf);
 }
 
 int is_question_new(char *path, char *word)
@@ -396,6 +399,7 @@ int is_question_new(char *path, char *word)
             {
                 if(strncmp(buf,word,act_word_size) == 0)
                 {
+                    free(buf);
                     return 0; 
                 }
             }
@@ -413,6 +417,7 @@ int is_question_new(char *path, char *word)
             ignore = 0;
         } 
     }
+    free(buf);
     return 1;
 }
 
@@ -475,6 +480,8 @@ void* d_thread_work(void* voidPtr)
             }
         }
     } while(dp != NULL);
+    free(word);
+    free(translation);
     return NULL;
 }
 
@@ -490,7 +497,8 @@ void* quit_thread_work(void* voidPtr)
             pthread_mutex_lock(args->mxQuitflag);
             
             char* input = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-            kill(0,SIGUSR1);            
+            kill(0,SIGUSR1);  
+            //printf("\n");          
             printf("\nAre you sure you want to exit? [y/n]:");
             scanf("%s", input);
 
@@ -498,15 +506,22 @@ void* quit_thread_work(void* voidPtr)
             {
                 *args->Quitflag = 1;
                 pthread_mutex_unlock(args->mxQuitflag);
+                free(input);
                 return NULL;
             }
             else
             {
+                free(input);
                 printf("continue then\n");
             }
             pthread_mutex_unlock(args->mxQuitflag);    
         }
+        if(signo == SIGUSR1)
+        {
+            printf("\n");
+        }
     }
+    free(args);
     return NULL;
 }
 
@@ -557,6 +572,8 @@ int read_one_line(char*path, char* word, char* translation, int start_pos)
         }
     }
     close(in);
+    free(first_word);
+    free(second_word);
     return bytes_read;
 }
 
@@ -581,6 +598,8 @@ void create_quiz_mode(int argc, char **argv)
     q_args.Quitflag = &Quitflag;
     q_args.mxQuitflag = &mx_quitflag;
     
+
+    sethandler(sig_handler,SIGUSR1);
     // signal mask
     sigset_t oldMask, newMask;
     sigemptyset(&newMask);
@@ -659,11 +678,12 @@ void create_quiz_mode(int argc, char **argv)
    
         }
     }
+    free(path);
+    free(dir_path);
 }
 
 int main(int argc, char **argv)
 {
-    sethandler(sig_handler,SIGUSR1);
     if(argc == 1) usage(argv[0]);  
     if(strcmp(argv[1],"-q") == 0) quiz_mode(argc,argv);
     else if(strcmp(argv[1],"-c") == 0) create_quiz_mode(argc,argv);
