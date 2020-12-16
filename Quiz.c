@@ -25,6 +25,7 @@ typedef struct time_thread_args
     int t;
     int *is_time_up;
     pthread_mutex_t* mx_is_time_up;
+    pthread_t* scanf_tid;
 } time_thread_args;
 
 typedef struct d_thread_args
@@ -41,8 +42,16 @@ typedef struct quit_thread_args
     pthread_t tid;
     int *Quitflag;
     pthread_mutex_t* mxQuitflag;
+    pthread_t* scanf_tid;
     sigset_t *pMask;
 } quit_thread_args;
+
+
+typedef struct scanf_thread_args
+{
+    pthread_t* tid;
+    char *input;
+} scanf_thread_args;
 
 void usage(char* pname);
 
@@ -66,11 +75,11 @@ void read_data(char* path, char ***quiz_tab);
 void print_stats(int correct, int n);
 void add_question(char* path, char *word, char* translation);
 int is_question_new2(char *path, char *word);
-int read_one_line(char*path, char* word, char* translation, int start_pos);
+void get_file_content(char *path, char **file_content);
 
 // core functions 
 void quiz_mode(int argc, char **argv);
-void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up, int *Quitflag, pthread_mutex_t* mx_quitflag);
+void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up, int *Quitflag, pthread_mutex_t* mx_quitflag, pthread_t* scanf_tid);
 void create_quiz_mode(int argc, char **argv);
 
 
@@ -193,7 +202,6 @@ void sig_handler(int sig)
         printf("\n"); // terminate scanf
 }
 
-
 // TODO: nie można tak przerywać tego scanfa coś trzeba z tym zrobić
 void* time_thread_work(void *voidPtr)
 {
@@ -204,7 +212,7 @@ void* time_thread_work(void *voidPtr)
     pthread_mutex_lock(args->mx_is_time_up);
     *args->is_time_up = 1;
     pthread_mutex_unlock(args->mx_is_time_up);    
-    kill(0,SIGUSR1); // send SIGUSR1 to terminate scanf
+    pthread_cancel(*args->scanf_tid); // send SIGUSR1 to terminate scanf
     return NULL;
 }
 
@@ -240,9 +248,9 @@ void* d_thread_work2(void* voidPtr)
                     while((token = strtok_r(rest, " \n", &rest)) != NULL)
                     {
                         strcpy(word,token);
-                        printf("%s Eng: %s \n",dp->d_name, token);
+                        //printf("%s Eng: %s \n",dp->d_name, token);
                         token = strtok_r(rest," \n", &rest);
-                        printf("%s PL: %s \n", dp->d_name, token);
+                        //printf("%s PL: %s \n", dp->d_name, token);
                         if(is_question_new2(args->path,word))
                         {
                             add_question(args->path,word,token);
@@ -278,7 +286,7 @@ void* quit_thread_work(void* voidPtr)
         if(signo == SIGINT || signo == SIGQUIT)
         {
             pthread_mutex_lock(args->mxQuitflag); // block quitflag to pause main thread with reading new data
-            kill(0,SIGUSR1); // terminate scanf action with SIGUSR1 signal
+            pthread_cancel(*args->scanf_tid);
             char* input = malloc(sizeof(char)*MAX_COMMAND_SIZE);
             printf("Are you sure you want to exit? [y/n]:");
             scanf("%s", input);
@@ -337,10 +345,10 @@ void insert_in_quiztab(char* file_content, int lines, char ***quiz_tab)
     {
         token = strtok_r(rest, " \n", &rest);
         strcpy(quiz_tab[i][0], token);
-        printf("ENG:%s ",token);
+        //printf("ENG:%s ",token);
         token = strtok_r(rest, " \n", &rest);
         strcpy(quiz_tab[i][1], token);
-        printf("PL:%s\n",token);
+        //printf("PL:%s\n",token);
     }
 }
 
@@ -391,7 +399,14 @@ int is_question_new2(char* path, char *word)
     return 1;
 }
 
-void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up, int *Quitflag, pthread_mutex_t* mx_quitflag)
+void* scanf_thread_work(void* voidPtr)
+{
+    scanf_thread_args* args = voidPtr;
+    scanf("%s",args->input);
+    return NULL;
+}
+
+void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up, int *Quitflag, pthread_mutex_t* mx_quitflag, pthread_t* scanf_tid)
 {
     // create array with numbers of questions
     int *numbers = malloc(sizeof(int)*questions_in_file);
@@ -412,7 +427,11 @@ void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int
         numbers[k] = val;            
     }
 
-    char* answer = malloc(sizeof(char) * MAX_COMMAND_SIZE);
+    char* input = malloc(sizeof(char) * MAX_COMMAND_SIZE);
+    scanf_thread_args s_args;
+    s_args.input = input;
+    s_args.tid = scanf_tid;    
+
     for(int i = 0; i < n; i++)
     {
         // check time is up flag of time thread
@@ -425,6 +444,13 @@ void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int
         }
         pthread_mutex_unlock(mx_is_time_up);
 
+        // ask next question
+        printf("%d. %s: ",i+1,quiz_tab[numbers[i%questions_in_file]][0]);
+       
+        // separated thread for scanf
+        pthread_create(s_args.tid, NULL, scanf_thread_work,&s_args);
+        pthread_join(*s_args.tid, NULL);   
+
         // check exitflag of quit thread
         pthread_mutex_lock(mx_quitflag);
         if(*Quitflag == 1)
@@ -434,17 +460,15 @@ void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int
         }
         pthread_mutex_unlock(mx_quitflag);
 
-        // ask next question
-        printf("%d. %s: ",i+1,quiz_tab[numbers[i%questions_in_file]][0]);
-        scanf("%s",answer);
-        if(strcmp(answer,quiz_tab[numbers[i%questions_in_file]][1]) == 0) 
+
+        if(strcmp(input,quiz_tab[numbers[i%questions_in_file]][1]) == 0) 
         {
             printf("answer is correct\n");
             (*correct)++;
         }
-        else printf("bad answer\n");            
+        else printf("bad answer\n");  
     }    
-    free(answer);
+    free(input);
     free(numbers);
 }
 
@@ -465,12 +489,14 @@ void quiz_mode(int argc, char **argv)
     // flags for time and quit thread
     int is_time_up = 0; 
     int Quitflag = 0;
+    pthread_t scanf_tid; // tid to scanf thread to cancel it
 
     // quit thread preparation
     quit_thread_args q_args;
     pthread_mutex_t mx_quitflag = PTHREAD_MUTEX_INITIALIZER;
     q_args.mxQuitflag = &mx_quitflag;
     q_args.Quitflag = &Quitflag;
+    q_args.scanf_tid = &scanf_tid;
     
     // quit thread 
     sethandler(sig_handler,SIGUSR1); // sigusr1 will be use to terminate scanf
@@ -489,6 +515,7 @@ void quiz_mode(int argc, char **argv)
     t_args.is_time_up = &is_time_up;
     pthread_mutex_t mx_is_time_up = PTHREAD_MUTEX_INITIALIZER;
     t_args.mx_is_time_up = &mx_is_time_up;
+    t_args.scanf_tid = &scanf_tid;
     int t_err = pthread_create(&(t_args.tid), NULL, time_thread_work, &t_args);
     if(t_err != 0) ERR("Couldn't create time thread");
     
@@ -511,11 +538,10 @@ void quiz_mode(int argc, char **argv)
     
     // read data from file to our table
     insert_in_quiztab(file_content,questions_in_file,quiz_tab);
-    //read_data(path,quiz_tab);
 
     // run test for user
     int correct = 0; // correct answers for statistics
-    test_user(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mx_is_time_up, &Quitflag, &mx_quitflag);
+    test_user(quiz_tab, questions_in_file,&correct,n,&is_time_up, &mx_is_time_up, &Quitflag, &mx_quitflag, &scanf_tid);
 
     // free allocated memory
     for(int i = 0; i < questions_in_file; i++)
