@@ -65,7 +65,7 @@ int count_lines(char*path);
 void read_data(char* path, char ***quiz_tab);
 void print_stats(int correct, int n);
 void add_question(char* path, char *word, char* translation);
-int is_question_new(char *path, char *word);
+int is_question_new2(char *path, char *word);
 int read_one_line(char*path, char* word, char* translation, int start_pos);
 
 // core functions 
@@ -220,77 +220,51 @@ void* d_thread_work2(void* voidPtr)
 
     if(NULL == (dirp = opendir(args->d_path))) ERR("opendir");
 
-
+    char *word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
+    char *file_content;
+    char *token;
+    char *rest;
     do
     {
-
-
-    } while(dp != NULL); // read all dir
-    return NULL;
-}
-
-
-// znowu przerwanie tym sygnałem jest źle, odzcztr z pliku po jednek pętli też jest błędny
-void* d_thread_work(void* voidPtr)
-{
-    d_thread_args *args = voidPtr;
-    printf("looking for .quiz files in DIR %s\n", args->d_path);
-    if(chdir(args->d_path)) ERR("chdir"); 
-    
-    DIR *dirp;
-    struct dirent *dp;
-    struct stat filestat;
-
-    if(NULL == (dirp = opendir(args->d_path))) ERR("opendir");
-
-    char*word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-    char*translation = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-
-    do
-    {
-        errno = 0;
+        // next one in dir
         if((dp = readdir(dirp)) != NULL) 
         {
             if(lstat(dp->d_name, &filestat)) ERR("lstat");
-            else if(S_ISREG(filestat.st_mode)) // check if current filestat is regular file
+            else if(S_ISREG(filestat.st_mode)) // regular files
             {
-                if(is_extension_valid(dp->d_name)) // add questions only from valid extension files
+                if(is_extension_valid(dp->d_name))
                 {
-                    printf("reading from file: %s\n", dp->d_name);
-                    int start_pos = 0; // start position in file
-                    int new_bytes = 0; // read bytes
-                    do
+                    printf("reading from file %s\n", dp->d_name);
+                    get_file_content(dp->d_name,&file_content);
+                    rest = file_content;            
+                    while((token = strtok_r(rest, " \n", &rest)) != NULL)
                     {
-                        // check SIGINT/SIGQUIT interuption
+                        strcpy(word,token);
+                        printf("%s Eng: %s \n",dp->d_name, token);
+                        token = strtok_r(rest," \n", &rest);
+                        printf("%s PL: %s \n", dp->d_name, token);
+                        if(is_question_new2(args->path,word))
+                        {
+                            add_question(args->path,word,token);
+                        }
+
+                        // check quit after each question
                         pthread_mutex_lock(args->mxQuitflag);
-                        if(*args->Quitflag == 1) 
+                        if(*args->Quitflag == 1)
                         {
                             pthread_mutex_unlock(args->mxQuitflag);
-                            break;
+                            free(file_content);
+                            free(token);
+                            free(word);
+                            return NULL;
                         }
                         pthread_mutex_unlock(args->mxQuitflag);
-
-                        // else read next line
-                        new_bytes = read_one_line(dp->d_name, word, translation, start_pos);
-                        start_pos += new_bytes;
-                        if(is_question_new(args->path,word)) // add only unique questions
-                            add_question(args->path,word,translation);
-                    } while (new_bytes != 0); // do while we reach end of file
-
-                    // check SIGINT/SIGQUIT interuption
-                    pthread_mutex_lock(args->mxQuitflag);
-                    if(*args->Quitflag == 1)
-                    {
-                        pthread_mutex_unlock(args->mxQuitflag);
-                        break;
-                    }
-                    pthread_mutex_unlock(args->mxQuitflag);           
-                }   
+                    }        
+                    free(file_content);
+                }
             }
         }
-    } while(dp != NULL); // read all dir
-    free(word);
-    free(translation);
+    } while(dp != NULL); // read all in dir
     return NULL;
 }
 
@@ -329,11 +303,12 @@ void* quit_thread_work(void* voidPtr)
 // return content of file
 void get_file_content(char *path, char **file_content)
 {
-    // size of file
+    // size of file to malloc
     struct stat st;
     stat(path, &st);
     int size = st.st_size;
-    // readfile
+    
+    // readfile 
     int in;
     if((in = open(path,O_RDONLY)) < 0) ERR("open");
     *file_content = malloc(sizeof(char)*size);
@@ -414,58 +389,6 @@ int is_question_new2(char* path, char *word)
         }
     }
     return 1;
-}
-
-int read_one_line(char*path, char* word, char* translation, int start_pos)
-{
-    int in; 
-    if((in = open(path,O_RDONLY)) < 0) ERR("open");
-
-    char *first_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-    char *second_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-
-    int ind = 0; // index in word
-    int actual_word_flag = 0; // 0 -> first word 1 -> second word
-    char c;
-    int bytes_read = 0;
-
-    if(lseek(in,start_pos,SEEK_SET) < 0) ERR("lseek"); // set file position to specific line
-    while(read(in,&c,1) > 0) 
-    {
-        bytes_read++; // one byte read in while condition
-        if(c == ' ') // end of first word
-        {
-            strcpy(word,first_word);
-            strcpy(first_word, "");
-            ind = 0;
-            actual_word_flag = 1;
-        }
-        else if(c == '\n') // end of second word
-        {
-            strcpy(translation,second_word);
-            strcpy(second_word, "");
-            break;
-        }            
-        else
-        {
-            if(actual_word_flag == 0) // first word
-            {
-                first_word[ind] = c;
-                first_word[ind+1] = '\0';
-                ind++;
-            }
-            else // second word
-            {
-                second_word[ind] = c;
-                second_word[ind+1] = '\0';
-                ind++;
-            } 
-        }
-    }
-    if(close(in)) ERR("close");
-    free(first_word);
-    free(second_word);
-    return bytes_read;
 }
 
 void test_user(char ***quiz_tab, int questions_in_file, int* correct, int n, int *is_time_up, pthread_mutex_t* mx_is_time_up, int *Quitflag, pthread_mutex_t* mx_quitflag)
@@ -673,7 +596,7 @@ void create_quiz_mode(int argc, char **argv)
         strcpy(d_args.path, path);
         d_args.mxQuitflag = &mx_quitflag;
         d_args.Quitflag = &Quitflag;
-        int dt_err = pthread_create(&(d_args.tid), NULL, d_thread_work,&d_args);
+        int dt_err = pthread_create(&(d_args.tid), NULL, d_thread_work2,&d_args);
         if(dt_err != 0) ERR("Couldn't create time thread");
         pthread_join(d_args.tid,NULL);
     }
