@@ -43,6 +43,8 @@ typedef struct quit_thread_args
     int *Quitflag;
     pthread_mutex_t* mxQuitflag;
     pthread_t* scanf_tid;
+    int *interrupt;
+    pthread_mutex_t* mxinterrupt;
     sigset_t *pMask;
 } quit_thread_args;
 
@@ -596,12 +598,20 @@ void create_quiz_mode(int argc, char **argv)
     int in; 
     if((in = open(path,O_CREAT|O_RDWR|O_APPEND,0777)) < 0) ERR("open");
 
+    // scanf_thread
+    pthread_t scanf_tid; // tid to scanf thread to cancel it
+    char* input = malloc(sizeof(char) * MAX_COMMAND_SIZE);
+    scanf_thread_args s_args;
+    s_args.input = input;
+    s_args.tid = &scanf_tid; 
+
     // quit thread
     int Quitflag = 0;
     pthread_mutex_t mx_quitflag = PTHREAD_MUTEX_INITIALIZER;
     quit_thread_args q_args;
     q_args.Quitflag = &Quitflag;
     q_args.mxQuitflag = &mx_quitflag;
+    q_args.scanf_tid = &scanf_tid;
     sethandler(sig_handler,SIGUSR1); // SIGUSR1 to terminate scanf
     sigset_t oldMask, newMask;
     sigemptyset(&newMask);
@@ -646,9 +656,31 @@ void create_quiz_mode(int argc, char **argv)
         else
         {
             pthread_mutex_unlock(&mx_quitflag);
-            scanf("%s %s", english_word, translation); 
-            if(strcmp(english_word, "exit") == 0 || strcmp(translation, "exit") == 0) break;
+            // 1st scanf
+            pthread_create(s_args.tid, NULL, scanf_thread_work, &s_args);
+            pthread_join(*s_args.tid,NULL);
+            strcpy(english_word,input);
+            if(strcmp(english_word, "exit") == 0) break;
         }
+
+        pthread_mutex_lock(&mx_quitflag);
+        if(Quitflag == 1)
+        {
+            pthread_mutex_unlock(&mx_quitflag);
+            break;
+        }
+        else
+        {
+            pthread_mutex_unlock(&mx_quitflag);
+            // 2st scanf
+            pthread_create(s_args.tid, NULL, scanf_thread_work, &s_args);
+            pthread_join(*s_args.tid,NULL);
+            strcpy(translation,input);
+            if(strcmp(translation, "exit") == 0) break;
+            
+        }
+
+
         
         // add to file
         pthread_mutex_lock(&mx_quitflag);
