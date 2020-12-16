@@ -193,6 +193,8 @@ void sig_handler(int sig)
         printf("\n"); // terminate scanf
 }
 
+
+// TODO: nie można tak przerywać tego scanfa coś trzeba z tym zrobić
 void* time_thread_work(void *voidPtr)
 {
     time_thread_args *args = voidPtr;
@@ -206,6 +208,29 @@ void* time_thread_work(void *voidPtr)
     return NULL;
 }
 
+void* d_thread_work2(void* voidPtr)
+{
+    d_thread_args *args = voidPtr;
+    printf("looking for .quiz files in DIR %s\n", args->d_path);
+    if(chdir(args->d_path)) ERR("chdir"); 
+
+    DIR *dirp;
+    struct dirent *dp;
+    struct stat filestat;
+
+    if(NULL == (dirp = opendir(args->d_path))) ERR("opendir");
+
+
+    do
+    {
+
+
+    } while(dp != NULL); // read all dir
+    return NULL;
+}
+
+
+// znowu przerwanie tym sygnałem jest źle, odzcztr z pliku po jednek pętli też jest błędny
 void* d_thread_work(void* voidPtr)
 {
     d_thread_args *args = voidPtr;
@@ -301,74 +326,47 @@ void* quit_thread_work(void* voidPtr)
     return NULL;
 }
 
-int count_lines(char*path)
+// return content of file
+void get_file_content(char *path, char **file_content)
 {
+    // size of file
+    struct stat st;
+    stat(path, &st);
+    int size = st.st_size;
+    // readfile
     int in;
     if((in = open(path,O_RDONLY)) < 0) ERR("open");
-    char c;
-    int questions_in_file = 0;
-    while(read(in,&c,1) > 0)
-    {
-        if(c == '\n')
-        {
-            questions_in_file++;
-        }
-    }
-    return questions_in_file;
+    *file_content = malloc(sizeof(char)*size);
+    if(read(in,*file_content,size) < 0) ERR("read");
+    if(close(in)) ERR("close");
 }
 
-void read_data(char* path, char ***quiz_tab)
+// EDIT: count lines 
+int count_lines(char* file_content)
 {
-    int in;
-    if((in = open(path,O_RDONLY)) < 0) ERR("open");
-
-    int actual_word_flag = 0; // 0 -> first word 1 -> second word
-    int curr = 0; // current line
-    int ind = 0; // current index in line
-    char *first_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-    char *second_word = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-    char c;
-
-    if(lseek(in,0,SEEK_SET) < 0) ERR("lseek");
-    while(read(in,&c,1) > 0)
+    int counter = 0;
+    for(int i = 0; i < strlen(file_content); i++)
     {
-        if(c == ' ') // end of first word 
-        {
-            // add first word
-            strcpy(quiz_tab[curr][0], first_word);
-            strcpy(first_word, "");
-            ind = 0; // reset index
-            actual_word_flag = 1; // next word will be translation of word
-        }
-        else if(c == '\n') // end of line
-        {
-            // add second word
-            strcpy(quiz_tab[curr][1], second_word);
-            strcpy(second_word, "");
-            curr++; // new line
-            actual_word_flag = 0; // next word will be english word
-            ind = 0; // reset index
-        }            
-        else
-        {
-            if(actual_word_flag == 0) // first word
-            {
-                first_word[ind] = c;
-                first_word[ind+1] = '\0';
-                ind++;
-            }
-            else // second word
-            {
-                second_word[ind] = c;
-                second_word[ind+1] = '\0';
-                ind++;
-            } 
-        }
+        if(file_content[i] == '\n') counter++;
     }
-    close(in);
-    free(first_word);
-    free(second_word);
+    return counter;
+}
 
+// insert to quiztab using file_content
+void insert_in_quiztab(char* file_content, int lines, char ***quiz_tab)
+{
+    char *token;
+    char *rest = file_content;
+
+    for(int i = 0; i < lines;i++)
+    {
+        token = strtok_r(rest, " \n", &rest);
+        strcpy(quiz_tab[i][0], token);
+        printf("ENG:%s ",token);
+        token = strtok_r(rest, " \n", &rest);
+        strcpy(quiz_tab[i][1], token);
+        printf("PL:%s\n",token);
+    }
 }
 
 void add_question(char* path, char *word, char* translation)
@@ -382,7 +380,7 @@ void add_question(char* path, char *word, char* translation)
 
     // adding to file
     int out;
-    if((out = open(path,O_RDWR|O_APPEND,0777)) < 0) ERR("open");
+    if((out = open(path,O_WRONLY|O_APPEND,0777)) < 0) ERR("open"); // - L385: dlaczego RDWR?
     if(write(out,buf,strlen(buf)) <= 0) ERR("write");
     if(close(out)) ERR("close");
     free(buf);
@@ -400,42 +398,21 @@ void print_stats(int correct, int n)
     else printf(" grade E\n");
 }
 
-int is_question_new(char *path, char *word)
+int is_question_new2(char* path, char *word)
 {
-    int in;
-    if((in = open(path,O_RDONLY)) < 0) ERR("open");
+    char *content;
+    get_file_content(path,&content);
+    
+    char *token;
+    char *rest = content;
 
-    char *buf = malloc(sizeof(char)*MAX_COMMAND_SIZE);
-    char c;
-    int act_word_size = 0; 
-    int ignore = 0; // we will check only first word in line second will be ignored
-    while(read(in,&c,1) != 0) // exit if we reach end of file
+    while((token = strtok_r(rest, " \n", &rest)))
     {
-        if(c == ' ') // end of a first word in a line
+        if(strcmp(token,word) == 0)
         {
-            if(act_word_size == strlen(word)) // words can be the same only if they have the same length
-            {
-                if(strncmp(buf,word,act_word_size) == 0) 
-                {
-                    free(buf);
-                    return 0; 
-                }
-            }
-            ignore = 1; // ignore second part of a line
+            return 0;
         }
-        if(ignore == 0) // first word in a line
-        {
-            buf[act_word_size] = c;
-            buf[act_word_size+1] = '\0';
-            act_word_size++;
-        }       
-        if(c == '\n') // end of a line
-        {
-            act_word_size = 0;
-            ignore = 0;
-        } 
     }
-    free(buf);
     return 1;
 }
 
@@ -485,7 +462,7 @@ int read_one_line(char*path, char* word, char* translation, int start_pos)
             } 
         }
     }
-    close(in);
+    if(close(in)) ERR("close");
     free(first_word);
     free(second_word);
     return bytes_read;
@@ -591,9 +568,15 @@ void quiz_mode(int argc, char **argv)
     t_args.mx_is_time_up = &mx_is_time_up;
     int t_err = pthread_create(&(t_args.tid), NULL, time_thread_work, &t_args);
     if(t_err != 0) ERR("Couldn't create time thread");
+    
+    // file in one string
+    char *file_content;
+    get_file_content(path,&file_content);
 
-    // prepare array with quiz words
-    int questions_in_file = count_lines(path);
+    // count how many lines are in that string
+    int questions_in_file = count_lines(file_content);
+
+    // allocate memory
     char ***quiz_tab;
     quiz_tab = malloc(sizeof(char**)*questions_in_file);
     for(int i = 0; i < questions_in_file; i++)
@@ -604,7 +587,8 @@ void quiz_mode(int argc, char **argv)
     }
     
     // read data from file to our table
-    read_data(path,quiz_tab);
+    insert_in_quiztab(file_content,questions_in_file,quiz_tab);
+    //read_data(path,quiz_tab);
 
     // run test for user
     int correct = 0; // correct answers for statistics
@@ -626,6 +610,8 @@ void quiz_mode(int argc, char **argv)
         pthread_mutex_unlock(&mx_quitflag);
         print_stats(correct,n);
         pthread_cancel(q_args.tid);
+        // - L628 wątek anulowany tez musi byc joinowany.
+        pthread_join(q_args.tid,NULL);
     }   
     else
     {
@@ -725,9 +711,9 @@ void create_quiz_mode(int argc, char **argv)
         else
         {
             pthread_mutex_unlock(&mx_quitflag);
-            if(strcmp(english_word,"") != 0 || strcmp(translation,"") != 0)
+            if(strcmp(english_word,"") != 0 && strcmp(translation,"") != 0) //  - L728: miało byc && czy ||?
             {
-                if(is_question_new(path,english_word))
+                if(is_question_new2(path,english_word))
                 {
                     add_question(path,english_word,translation);
                     printf("[%s %s] was added\n", english_word, translation);
